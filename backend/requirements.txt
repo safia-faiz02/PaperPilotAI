@@ -1,0 +1,85 @@
+# These are the Python libraries our app needs.
+# Right now, just two:
+
+fastapi==0.115.0
+# fastapi -> the web framework itself (defines @app.get etc.)
+
+uvicorn[standard]==0.32.0
+# uvicorn -> the actual program that RUNS a FastAPI app and listens for
+# incoming web requests. FastAPI is just code; uvicorn is the engine that
+# makes it reachable over a network.
+
+sqlalchemy==2.0.35
+# sqlalchemy -> lets us talk to a database (PostgreSQL, in our case) using
+# Python objects/functions instead of writing raw SQL by hand everywhere.
+
+psycopg2-binary==2.9.9
+# psycopg2-binary -> the actual "driver" that knows how to speak Postgres's
+# network protocol. SQLAlchemy is the friendly Python layer on top;
+# psycopg2 is what does the real talking to the database underneath.
+
+python-dotenv==1.0.1
+# python-dotenv -> lets us load settings (like database passwords) from a
+# .env file instead of hardcoding them in our Python code.
+
+redis==5.1.1
+# redis -> the Python client library that lets us talk to a Redis server.
+# We'll use Redis later as a cache and as the "inbox" for background
+# jobs (Celery). For now we're just proving the connection works.
+
+alembic==1.13.3
+# alembic -> manages changes to our database structure over time (e.g.
+# "add a users table", "add a column to papers") as a series of ordered,
+# version-controlled scripts — instead of manually running SQL by hand
+# and hoping everyone's database ends up in the same state.
+
+passlib[bcrypt]==1.7.4
+# passlib -> handles password hashing safely (we never want to write
+# our own crypto code). [bcrypt] installs the specific hashing algorithm
+# we're using alongside it.
+
+bcrypt==4.0.1
+# Pinned explicitly because passlib's bcrypt integration can be picky
+# about exact bcrypt versions — this combination is known to work together.
+
+pydantic[email]==2.9.2
+# Adds email-validator, which is what lets Pydantic's EmailStr type
+# actually check "is this a real-looking email address" instead of just
+# accepting any string.
+
+python-jose[cryptography]==3.3.0
+# python-jose -> creates and validates JWT tokens. A JWT (JSON Web Token)
+# is a small signed string we give users after login. They send it back
+# with every future request, and we verify the signature to know who they
+# are — without hitting the database every time.
+
+python-multipart==0.0.12
+# python-multipart -> required by FastAPI whenever an endpoint uses form
+# data (like our /auth/login, which uses OAuth2PasswordRequestForm).
+# Without this, FastAPI crashes on startup when it sees a form endpoint.
+
+httpx==0.27.2
+# httpx -> an async-capable HTTP client for making requests to external
+# APIs (arXiv, Semantic Scholar, etc.). Like the `requests` library but
+# designed to work with Python's async/await — essential for non-blocking
+# API calls in a FastAPI application.
+
+xmltodict==0.13.0
+# xmltodict -> converts XML responses into Python dictionaries. arXiv's
+# API returns XML, so we use this to parse it without writing raw XML
+# parsing code.
+
+openai==1.51.0
+# openai -> kept for future LLM chat/completions (LangChain steps).
+
+fastembed==0.4.1
+# fastembed -> runs embedding models locally with NO PyTorch dependency.
+# Downloads a small ONNX model (~45MB) on first use and runs it via
+# onnxruntime — fast, lightweight, zero external API calls needed.
+# Model: BAAI/bge-small-en-v1.5 (384 dimensions, excellent quality)
+
+qdrant-client==1.12.0
+# qdrant-client -> official Python client for Qdrant vector database.
+
+# We'll add more libraries (LangChain, LangGraph, Celery, etc.) in later
+# steps, one at a time, so it's always clear what each one is for.

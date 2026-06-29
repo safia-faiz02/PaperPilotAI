@@ -1,0 +1,13 @@
+# When you publish this project to GitHub later, these files/folders
+# should NEVER be uploaded — .gitignore tells git to skip them.
+
+.env
+# .env contains real passwords/secrets. .env.example (the template,
+# with no real secrets) is fine to commit; .env itself never is.
+
+__pycache__/
+*.pyc
+# Python's auto-generated cache files — not source code, no need to track.
+
+.vscode/
+# Your personal editor settings — everyone's VS Code setup differs.

@@ -1,0 +1,129 @@
+# docker-compose.yml lets us define one or more containers and run them
+# together with a single command. Right now we only have ONE container
+# (our API), but this file is exactly where we'll add PostgreSQL, Redis,
+# and the rest, one at a time, in later steps — you'll see how natural
+# that is once this first piece is working.
+
+services:
+  # "api" is just a name we're choosing for this container. We'll refer
+  # to it by this name later (e.g. when other containers need to talk to it).
+  api:
+    # build: tells Docker "don't pull a pre-made image, build one yourself
+    # using the Dockerfile found in ./backend"
+    build: ./backend
+
+    # Maps a port on YOUR Windows machine to a port INSIDE the container.
+    # "8000:8000" means: requests to localhost:8000 on your machine get
+    # forwarded to port 8000 inside the container (the port uvicorn listens on).
+    ports:
+      - "8000:8000"
+
+    # Mounts your local ./backend/app folder into the container's /app/app
+    # folder. This means when you edit main.py in VS Code, the change is
+    # instantly visible inside the running container — no rebuild needed.
+    volumes:
+      - ./backend/app:/app/app
+
+    # env_file loads all the variables from our .env file (POSTGRES_USER,
+    # POSTGRES_PASSWORD, etc.) and makes them available inside this
+    # container as environment variables — which is exactly what
+    # database.py reads via os.getenv(...).
+    env_file:
+      - .env
+
+    # depends_on tells Docker: "don't even start the api container until
+    # the postgres container is healthy" (see postgres's healthcheck
+    # below). Without this, api might start and try to connect to a
+    # database that isn't ready yet.
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+
+  # Our second container: a real PostgreSQL database. "postgres" here is
+  # both the container's name AND the hostname other containers use to
+  # reach it (that's why .env has POSTGRES_HOST=postgres, not localhost).
+  postgres:
+    # Unlike "api", we don't need to build this ourselves — Postgres
+    # publishes an official, ready-made image on Docker Hub. "image:"
+    # tells Docker to just download and run that instead of building.
+    image: postgres:16
+
+    # Postgres's official image reads these exact variable names to set
+    # up the initial database, username, and password on first run.
+    env_file:
+      - .env
+
+    # A "volume" here means: store the actual database files outside the
+    # container, in a Docker-managed storage area called "pgdata" (defined
+    # at the bottom of this file). Without this, every time you stopped
+    # and removed the container, you'd lose all your data. With it, data
+    # survives container restarts/rebuilds.
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+    # Exposes Postgres on your Windows machine too, at localhost:5432 —
+    # handy if you ever want to inspect the database directly with a tool
+    # like DBeaver or pgAdmin. Not required for our api to work (it talks
+    # to postgres internally via Docker's own network).
+    ports:
+      - "5432:5432"
+
+    # A healthcheck: Docker repeatedly runs this command inside the
+    # container to determine if Postgres is actually ready to accept
+    # connections yet (just because the container "started" doesn't mean
+    # the database inside has finished initializing). pg_isready is a
+    # small utility built into the postgres image for exactly this.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # Our third container: Redis. Like postgres, this uses an official
+  # ready-made image — no Dockerfile of our own needed.
+  redis:
+    image: redis:7-alpine
+    # "alpine" = a minimal version of the image, smaller download.
+
+    ports:
+      - "6379:6379"
+    # Exposes Redis on your Windows machine at localhost:6379, handy for
+    # inspecting it directly with a tool like RedisInsight later. Not
+    # required for our api to work.
+
+    # Same idea as Postgres's healthcheck: "redis-cli ping" is a built-in
+    # command that replies PONG when Redis is ready to accept connections.
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # Our fourth container: Qdrant, the vector database.
+  # A vector database stores "embeddings" — lists of ~1500 numbers that
+  # represent the MEANING of a piece of text. Once paper abstracts are
+  # embedded and stored here, we can search by MEANING ("find papers
+  # about attention mechanisms") rather than exact keywords. This is
+  # the core of what makes RAG systems powerful.
+  qdrant:
+    image: qdrant/qdrant
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    # Qdrant's image doesn't have curl or wget built in, so we use
+    # a simple TCP check instead — just confirms the port is open and
+    # accepting connections, which is all we actually need to know.
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'cat < /dev/null > /dev/tcp/localhost/6333'"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  pgdata:
+  qdrant_data:

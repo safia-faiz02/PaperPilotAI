@@ -1,0 +1,4 @@
+# This file exists only so the (currently empty) "versions" folder gets
+# included when this project is zipped or committed to git — git doesn't
+# track empty folders. Once you run your first migration, Alembic will
+# create a real .py file in here, and you can ignore this file from then on.
