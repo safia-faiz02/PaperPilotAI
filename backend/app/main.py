@@ -5,8 +5,10 @@
 # router file under app/api/routes/ (like auth.py) rather than piling up
 # in this file.
 
+import os
 from fastapi import FastAPI
 from contextlib import asynccontextmanager
+from prometheus_fastapi_instrumentator import Instrumentator
 
 from app.database import check_database_connection, SessionLocal
 from app.cache import check_redis_connection
@@ -34,6 +36,18 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"Warning: Could not connect to Qdrant at startup: {e}")
         print("Qdrant features will be unavailable until it's reachable.")
+
+    # LangSmith tracing is entirely env-var driven — LangChain/LangGraph
+    # check LANGCHAIN_TRACING_V2 and LANGCHAIN_API_KEY themselves on every
+    # call, so there's no client to construct here. This is just a
+    # startup log line so it's obvious from `docker compose logs api`
+    # whether traces are actually being sent anywhere.
+    tracing_on = os.getenv("LANGCHAIN_TRACING_V2", "false").lower() == "true"
+    if tracing_on and os.getenv("LANGCHAIN_API_KEY"):
+        print(f"--- LangSmith tracing ENABLED (project: {os.getenv('LANGCHAIN_PROJECT', 'default')}) ---")
+    else:
+        print("--- LangSmith tracing disabled (set LANGCHAIN_TRACING_V2=true and LANGCHAIN_API_KEY in .env to enable) ---")
+
     yield
     # Nothing to clean up on shutdown for now
 
@@ -47,6 +61,13 @@ app = FastAPI(
 
 app.include_router(auth.router, prefix="/auth", tags=["auth"])
 app.include_router(papers.router, prefix="/papers", tags=["papers"])
+
+# Wires up GET /metrics with standard HTTP metrics (request count,
+# latency histograms, in-progress requests) for every route above —
+# the format a Prometheus server scrapes. Called after the routers are
+# mounted so it can instrument all of them; .expose() is what actually
+# adds the /metrics endpoint itself.
+Instrumentator().instrument(app).expose(app)
 
 
 # This is a "route". The decorator @app.get("/") means:

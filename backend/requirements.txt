@@ -101,5 +101,25 @@ langgraph==0.2.60
 # instead of one straight-line chain — including loops, so the graph can
 # send its own output back through a validation node and retry itself.
 
+langsmith==0.1.147
+# langsmith -> was already installed as a dependency of langchain-core;
+# pinned explicitly here because it's what actually DOES the tracing.
+# Once LANGCHAIN_TRACING_V2=true and LANGCHAIN_API_KEY are set (see
+# .env), every prompt, LLM call, and graph node run gets logged to
+# LangSmith automatically — LangChain reads those env vars itself, no
+# code changes needed. Free tier: https://smith.langchain.com
+
+prometheus-client==0.21.0
+# prometheus-client -> lets us define custom metrics (Counters) directly
+# in our own code — used in synthesis_graph.py to track AI-pipeline-
+# specific numbers, like how often the reflect node catches a
+# hallucinated citation, not just generic HTTP request counts.
+
+prometheus-fastapi-instrumentator==7.0.0
+# prometheus-fastapi-instrumentator -> auto-instruments every FastAPI
+# route with standard HTTP metrics (request count, latency histograms,
+# in-progress requests) and exposes them at GET /metrics — the format a
+# Prometheus server scrapes. One line to wire up (see main.py).
+
 # We'll add more libraries (Celery, etc.) in later steps, one at a time,
 # so it's always clear what each one is for.

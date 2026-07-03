@@ -44,11 +44,33 @@ import difflib
 from typing import TypedDict, Optional
 
 from langgraph.graph import StateGraph, END
+from prometheus_client import Counter
 
 from app.agents.synthesis_agent import (
     GROQ_API_KEY,
     _synthesis_chain,
     format_papers_for_prompt,
+)
+
+# Custom metrics (exposed at GET /metrics alongside the generic HTTP
+# metrics from main.py) — these are specific to the AI pipeline itself,
+# not just "how many requests came in". They make the reflect node's
+# work observable: how often the LLM actually hallucinates a citation,
+# and how often retrying fixes it versus running out of attempts.
+SYNTHESIS_ATTEMPTS = Counter(
+    "paperpilot_synthesis_attempts_total",
+    "Number of times the synthesize node has called the LLM "
+    "(one graph run uses 1 attempt normally, more if it retries)",
+)
+CITATIONS_CHECKED = Counter(
+    "paperpilot_citations_checked_total",
+    "Citations checked by the reflect node",
+    ["result"],  # "valid" or "invalid"
+)
+GRAPH_RUNS_FINISHED = Counter(
+    "paperpilot_synthesis_graph_runs_total",
+    "Completed synthesis graph runs, by how they ended",
+    ["outcome"],  # "citations_valid" or "retries_exhausted"
 )
 
 
@@ -86,6 +108,7 @@ async def synthesize_node(state: SynthesisState) -> dict:
         "query": query,
         "papers_text": papers_text,
     })
+    SYNTHESIS_ATTEMPTS.inc()
 
     return {
         "synthesis": result,
@@ -143,6 +166,11 @@ def validate_citations(
 def reflect_node(state: SynthesisState) -> dict:
     citations = extract_citations(state["synthesis"])
     valid, invalid = validate_citations(citations, state["papers"])
+
+    if valid:
+        CITATIONS_CHECKED.labels(result="valid").inc(len(valid))
+    if invalid:
+        CITATIONS_CHECKED.labels(result="invalid").inc(len(invalid))
 
     is_valid = len(citations) > 0 and len(invalid) == 0
 
@@ -270,6 +298,10 @@ async def run_synthesis_graph(
     }
 
     final_state = await _synthesis_graph.ainvoke(initial_state)
+
+    GRAPH_RUNS_FINISHED.labels(
+        outcome="citations_valid" if final_state["is_valid"] else "retries_exhausted"
+    ).inc()
 
     return {
         "synthesis": final_state["synthesis"],
