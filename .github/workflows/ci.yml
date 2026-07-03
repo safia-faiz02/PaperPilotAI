@@ -1,0 +1,46 @@
+# GitHub Actions CI — runs automatically on every push/PR to main.
+#
+# Two jobs:
+#   1. test         — installs backend deps, runs the pytest suite.
+#   2. docker-build — only runs if `test` passes; builds the actual
+#                      Dockerfile to catch dependency/build breakage
+#                      before it reaches main. Doesn't push the image
+#                      anywhere, just proves it builds cleanly.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Run tests
+        run: python -m pytest -v
+
+  docker-build:
+    runs-on: ubuntu-latest
+    needs: test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build API image
+        run: docker build -t paperpilot-api:ci ./backend

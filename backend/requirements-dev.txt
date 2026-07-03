@@ -1,0 +1,8 @@
+# Dev-only dependencies — NOT installed in the production Docker image
+# (the Dockerfile only ever installs requirements.txt). Keeping these
+# separate means test tooling never ships inside the actual API
+# container; it's only installed on your machine and in CI to run tests.
+
+pytest==8.3.3
+# pytest -> the test runner. `pytest -v` in backend/ auto-discovers any
+# file matching test_*.py and runs every function inside it named test_*.
