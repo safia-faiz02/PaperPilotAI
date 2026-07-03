@@ -74,12 +74,32 @@ openai==1.51.0
 
 fastembed==0.4.1
 # fastembed -> runs embedding models locally with NO PyTorch dependency.
-# Downloads a small ONNX model (~45MB) on first use and runs it via
-# onnxruntime — fast, lightweight, zero external API calls needed.
-# Model: BAAI/bge-small-en-v1.5 (384 dimensions, excellent quality)
 
 qdrant-client==1.12.0
 # qdrant-client -> official Python client for Qdrant vector database.
 
-# We'll add more libraries (LangChain, LangGraph, Celery, etc.) in later
-# steps, one at a time, so it's always clear what each one is for.
+langchain==0.3.7
+# langchain -> the core framework for building LLM-powered chains and
+# agents. Gives us prompt templates, output parsers, and the LCEL
+# (LangChain Expression Language) pipe syntax for chaining steps together.
+
+langchain-groq==0.2.1
+# langchain-groq -> LangChain's integration with Groq's API. Groq runs
+# Llama 3 on their servers with extremely fast inference (~0.5s responses)
+# and a generous free tier (14,400 requests/day). This is what our
+# synthesis agent will use to actually generate text.
+
+langchain-core==0.3.29
+# langchain-core -> the base abstractions LangChain is built on
+# (runnables, messages, prompts). Required by langchain and langchain-groq.
+# Bumped from 0.3.19 -> 0.3.29 because langgraph (below) explicitly
+# excludes several 0.3.x point releases, including 0.3.19.
+
+langgraph==0.2.60
+# langgraph -> builds on langchain-core to let us define multi-step
+# agent workflows as a GRAPH of nodes (supervisor, synthesize, reflect)
+# instead of one straight-line chain — including loops, so the graph can
+# send its own output back through a validation node and retry itself.
+
+# We'll add more libraries (Celery, etc.) in later steps, one at a time,
+# so it's always clear what each one is for.
