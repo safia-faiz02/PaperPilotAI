@@ -11,3 +11,6 @@ __pycache__/
 
 .vscode/
 # Your personal editor settings — everyone's VS Code setup differs.
+
+.claude/
+# Local Claude Code session/config state — not project source.

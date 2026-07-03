@@ -78,7 +78,14 @@ say about the research query."""),
     ])
 
     llm = ChatGroq(
-        api_key=GROQ_API_KEY,
+        # ChatGroq treats an empty string as "no key" and falls back to
+        # checking the GROQ_API_KEY env var itself — if that's ALSO
+        # unset, the underlying groq client raises immediately here,
+        # crashing the whole app at import time. "not-set" is a harmless
+        # placeholder that satisfies the constructor; synthesize_papers()
+        # below already checks GROQ_API_KEY before ever calling this
+        # chain, so a placeholder key is never actually used to call Groq.
+        api_key=GROQ_API_KEY or "not-set",
         model=GROQ_MODEL,
         temperature=0.3,
         # temperature=0.3 means "mostly deterministic" — we want
