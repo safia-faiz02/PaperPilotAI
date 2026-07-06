@@ -14,3 +14,11 @@ __pycache__/
 
 .claude/
 # Local Claude Code session/config state — not project source.
+
+frontend/.streamlit/secrets.toml
+# Same idea as .env — this holds the real API base URL config (and would
+# hold any real secrets later). secrets.toml.example is the committed
+# template.
+
+frontend/venv/
+frontend/__pycache__/
