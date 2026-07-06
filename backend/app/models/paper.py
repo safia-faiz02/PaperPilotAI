@@ -1,5 +1,6 @@
-from sqlalchemy import Column, Integer, String, DateTime, JSON
+from sqlalchemy import Column, Integer, String, DateTime, JSON, Boolean
 from sqlalchemy.sql import func
+from sqlalchemy.sql.expression import false
 
 from app.models.base import Base
 
@@ -39,5 +40,12 @@ class Paper(Base):
     venue = Column(String, nullable=True)
     citation_count = Column(Integer, nullable=True)
     abstract = Column(String, nullable=True)
+
+    is_embedded = Column(Boolean, nullable=False, server_default=false())
+    # Tracks whether this paper already has a vector stored in Qdrant, so
+    # the frontend doesn't have to guess or re-track this client-side.
+    # Uses SQLAlchemy's false() construct (not the raw string "false") so
+    # it compiles to the correct DDL per dialect — a literal string default
+    # is stored as the TEXT "false" on SQLite, which is truthy, not falsy.
 
     ingested_at = Column(DateTime(timezone=True), server_default=func.now())

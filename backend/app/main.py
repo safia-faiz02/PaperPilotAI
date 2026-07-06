@@ -7,6 +7,7 @@
 
 import os
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from prometheus_fastapi_instrumentator import Instrumentator
 
@@ -57,6 +58,19 @@ app = FastAPI(
     description="Multi-agent research literature review platform",
     version="0.1.0",
     lifespan=lifespan,
+)
+
+# Allows a frontend running on a different origin (e.g. Streamlit on
+# :8501, or a browser-based SPA on :5173) to call this API. Streamlit
+# itself calls the API server-side (via `requests`, not browser JS) so
+# this isn't a hard blocker for Streamlit specifically, but it's needed
+# for any browser-based client and costs nothing to have on.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=os.getenv("CORS_ORIGINS", "http://localhost:8501").split(","),
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 app.include_router(auth.router, prefix="/auth", tags=["auth"])

@@ -69,9 +69,6 @@ xmltodict==0.13.0
 # API returns XML, so we use this to parse it without writing raw XML
 # parsing code.
 
-openai==1.51.0
-# openai -> kept for future LLM chat/completions (LangChain steps).
-
 fastembed==0.4.1
 # fastembed -> runs embedding models locally with NO PyTorch dependency.
 

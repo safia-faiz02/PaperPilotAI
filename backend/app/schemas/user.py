@@ -45,4 +45,10 @@ class Token(BaseModel):
     for "this is a token you put in the Authorization header."
     """
     access_token: str
+    refresh_token: str
     token_type: str = "bearer"
+
+
+class RefreshRequest(BaseModel):
+    """What the client sends to trade a refresh token for a new access token."""
+    refresh_token: str

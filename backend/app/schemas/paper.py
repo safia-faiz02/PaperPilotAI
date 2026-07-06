@@ -31,6 +31,7 @@ class PaperOut(BaseModel):
     year: Optional[int] = None
     venue: Optional[str] = None
     citation_count: Optional[int] = None
+    is_embedded: bool = False
     ingested_at: datetime
 
     class Config:

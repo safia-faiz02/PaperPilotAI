@@ -6,3 +6,5 @@
 from app.models.base import Base
 from app.models.user import User
 from app.models.paper import Paper
+from app.models.library_entry import LibraryEntry
+from app.models.refresh_token import RefreshToken

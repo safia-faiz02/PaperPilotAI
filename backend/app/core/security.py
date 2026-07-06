@@ -12,7 +12,9 @@
 from passlib.context import CryptContext
 from datetime import datetime, timedelta, timezone
 from jose import JWTError, jwt
+import hashlib
 import os
+import secrets
 
 # ── Password hashing ──────────────────────────────────────────────────────────
 
@@ -86,3 +88,35 @@ def decode_access_token(token: str) -> str | None:
         # In all these cases we just return None — the caller then decides
         # to reject the request with a 401 Unauthorized response.
         return None
+
+
+# ── Refresh tokens ────────────────────────────────────────────────────────────
+# Unlike the access token (a self-contained, short-lived JWT), a refresh
+# token is just a long random string we store server-side (hashed) so it
+# can be looked up, checked for expiry/revocation, and rotated. This is
+# what lets a client silently get a new access token instead of being
+# forced to log in again every 30 minutes.
+
+REFRESH_TOKEN_EXPIRE_DAYS = int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", "7"))
+
+
+def generate_refresh_token() -> tuple[str, str, datetime]:
+    """
+    Returns (raw_token, token_hash, expires_at). The raw token is what
+    goes to the client; only the hash is ever stored in the database, the
+    same way we never store a plain password.
+    """
+    raw_token = secrets.token_urlsafe(32)
+    token_hash = hash_refresh_token(raw_token)
+    expires_at = datetime.now(timezone.utc) + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
+    return raw_token, token_hash, expires_at
+
+
+def hash_refresh_token(raw_token: str) -> str:
+    """
+    A refresh token is a random string, not a password someone chose —
+    there's no brute-force risk to defend against, so a fast, deterministic
+    hash (unlike bcrypt's salted, slow one) is fine and lets us look it up
+    by value directly.
+    """
+    return hashlib.sha256(raw_token.encode()).hexdigest()

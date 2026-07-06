@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 from pydantic import BaseModel
 
 from app.database import get_db
-from app.models import User, Paper
+from app.models import User, Paper, LibraryEntry
 from app.schemas.paper import PaperSearchRequest, PaperSearchResponse, PaperOut
 from app.api.routes.auth import get_current_user
 from app.integrations.arxiv_client import search_arxiv
@@ -12,6 +12,15 @@ from app.agents.synthesis_agent import synthesize_papers
 from app.agents.synthesis_graph import run_synthesis_graph
 
 router = APIRouter()
+
+# How many extra candidates to pull from Qdrant before filtering down to
+# "papers in this user's library." Qdrant's vectors are shared/global (one
+# per paper, not duplicated per user), so a query can surface papers other
+# users embedded too — over-fetching and filtering in Python is a simple,
+# pragmatic way to scope results without needing a native Qdrant payload
+# filter. Fine at personal-tool scale (dozens-hundreds of papers); a much
+# larger shared corpus would eventually want real Qdrant-side filtering.
+LIBRARY_FILTER_OVERSAMPLE = 4
 
 
 class SemanticSearchRequest(BaseModel):
@@ -26,6 +35,23 @@ class SynthesisRequest(BaseModel):
     # for best synthesis quality — too many papers overwhelm the LLM.
 
 
+def _user_library_paper_ids(db: Session, user_id: int) -> set[int]:
+    """All paper IDs currently in this user's library."""
+    rows = db.query(LibraryEntry.paper_id).filter(LibraryEntry.user_id == user_id).all()
+    return {row[0] for row in rows}
+
+
+def _add_to_library(db: Session, user_id: int, paper_id: int) -> None:
+    """Get-or-create a LibraryEntry — a paper can be in many users' libraries."""
+    existing = (
+        db.query(LibraryEntry)
+        .filter(LibraryEntry.user_id == user_id, LibraryEntry.paper_id == paper_id)
+        .first()
+    )
+    if not existing:
+        db.add(LibraryEntry(user_id=user_id, paper_id=paper_id))
+
+
 @router.post("/search", response_model=PaperSearchResponse)
 async def search_papers(
     request: PaperSearchRequest,
@@ -33,14 +59,9 @@ async def search_papers(
     current_user: User = Depends(get_current_user),
 ):
     """
-    Searches arXiv for papers matching the query, saves new ones to
-    the database, and returns the full list.
-
-    This endpoint is `async` (notice `async def` instead of just `def`)
-    because it calls `await search_arxiv(...)` — an async function that
-    makes a real network request. Any endpoint that calls async functions
-    must itself be async. Our auth and DB endpoints above were regular
-    `def` because they didn't need async; this one does.
+    Searches arXiv for papers matching the query, saves new ones to the
+    shared papers table, adds them to the current user's library, and
+    returns the full list.
 
     Protected: requires a valid JWT token (via get_current_user).
     """
@@ -63,10 +84,10 @@ async def search_papers(
             detail=f"No papers found for query: '{request.query}'",
         )
 
-    # Step 2: save new papers to the database, skip ones we already have.
-    # This is called "upsert" logic (update-or-insert). We check by
-    # external_id — if a paper with that arXiv ID is already in our DB,
-    # we skip it rather than saving a duplicate.
+    # Step 2: save new papers to the shared papers table, skip ones we
+    # already have (by external_id — this is a "upsert" check, and it's
+    # global, not per-user, so two users searching the same topic don't
+    # create duplicate paper rows or duplicate embeddings).
     saved_papers = []
     new_count = 0
     existing_count = 0
@@ -79,25 +100,25 @@ async def search_papers(
         )
 
         if existing:
-            # Already in the database — just collect it for the response
             saved_papers.append(existing)
             existing_count += 1
         else:
-            # Brand new paper — create a database row for it
             new_paper = Paper(**paper_data)
             db.add(new_paper)
             db.flush()
             # flush() sends the INSERT to Postgres immediately so
             # new_paper.id gets populated, but doesn't commit yet.
-            # We commit once after the loop (one transaction for all
-            # inserts is faster than committing inside the loop).
             saved_papers.append(new_paper)
             new_count += 1
 
+    # Step 3: make sure every one of these papers is in THIS user's
+    # library, regardless of whether the paper row itself was new or
+    # already existed (someone else may have found it first).
+    for paper in saved_papers:
+        _add_to_library(db, current_user.id, paper.id)
+
     db.commit()
 
-    # refresh each new paper so SQLAlchemy fills in server-generated
-    # fields like `ingested_at` from the database.
     for paper in saved_papers:
         db.refresh(paper)
 
@@ -118,17 +139,19 @@ def list_papers(
     current_user: User = Depends(get_current_user),
 ):
     """
-    Returns all papers saved in the database so far, with pagination.
-
-    `skip` and `limit` are query parameters — the client calls:
-    GET /papers/?skip=0&limit=20   (first page)
-    GET /papers/?skip=20&limit=20  (second page)
-
-    This pattern is called "offset pagination" and is the simplest
-    kind — we'll improve it later if we need cursor-based pagination
-    for very large datasets.
+    Returns papers in the CURRENT USER's library, with pagination.
+    Joins through library_entries so each user only sees what they've
+    personally saved, even though the underlying papers table is shared.
     """
-    papers = db.query(Paper).offset(skip).limit(limit).all()
+    papers = (
+        db.query(Paper)
+        .join(LibraryEntry, LibraryEntry.paper_id == Paper.id)
+        .filter(LibraryEntry.user_id == current_user.id)
+        .order_by(Paper.id)
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )
     return papers
 
 
@@ -139,11 +162,17 @@ def get_paper(
     current_user: User = Depends(get_current_user),
 ):
     """
-    Returns a single paper by its internal database ID.
-    The {paper_id} in the URL is a "path parameter" — FastAPI
-    extracts it automatically and passes it to the function.
+    Returns a single paper by its internal database ID — but only if it's
+    in the current user's library. A paper that exists but isn't in your
+    library 404s the same as one that doesn't exist at all, so this
+    endpoint never reveals what other users have saved.
     """
-    paper = db.query(Paper).filter(Paper.id == paper_id).first()
+    paper = (
+        db.query(Paper)
+        .join(LibraryEntry, LibraryEntry.paper_id == Paper.id)
+        .filter(Paper.id == paper_id, LibraryEntry.user_id == current_user.id)
+        .first()
+    )
     if not paper:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -159,17 +188,16 @@ def embed_single_paper(
     current_user: User = Depends(get_current_user),
 ):
     """
-    Generates and stores a vector embedding for a single paper.
-
-    Call this after searching — it takes a paper already in Postgres,
-    sends its title + abstract to OpenAI's embedding API, and stores
-    the resulting vector in Qdrant. Once embedded, the paper becomes
-    findable via POST /papers/semantic-search.
-
-    In a later step, Celery will do this automatically in the background
-    whenever a new paper is saved — for now we call it manually.
+    Generates and stores a vector embedding for a single paper in the
+    current user's library. Once embedded, the paper becomes findable via
+    POST /papers/semantic-search (for any user who has it in their library).
     """
-    paper = db.query(Paper).filter(Paper.id == paper_id).first()
+    paper = (
+        db.query(Paper)
+        .join(LibraryEntry, LibraryEntry.paper_id == Paper.id)
+        .filter(Paper.id == paper_id, LibraryEntry.user_id == current_user.id)
+        .first()
+    )
     if not paper:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -192,12 +220,86 @@ def embed_single_paper(
     if not success:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Embedding failed. Check your OPENAI_API_KEY in .env.",
+            detail="Embedding failed. Check the API logs for details.",
         )
+
+    paper.is_embedded = True
+    db.commit()
 
     return {
         "message": f"Paper '{paper.title[:60]}...' successfully embedded.",
         "paper_id": paper.id,
+    }
+
+
+@router.delete("/{paper_id}", status_code=status.HTTP_204_NO_CONTENT)
+def remove_paper_from_library(
+    paper_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Removes a paper from the CURRENT USER's library only. The shared
+    Paper row (and its Qdrant vector, if embedded) is left untouched —
+    other users may still have it in their own library, and re-adding it
+    later shouldn't require re-embedding.
+    """
+    entry = (
+        db.query(LibraryEntry)
+        .filter(LibraryEntry.user_id == current_user.id, LibraryEntry.paper_id == paper_id)
+        .first()
+    )
+    if not entry:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Paper with id {paper_id} not found in your library.",
+        )
+    db.delete(entry)
+    db.commit()
+    return None
+
+
+@router.post("/embed-all")
+def embed_all_papers(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Embeds every not-yet-embedded paper in the current user's library that
+    has an abstract. Lets the frontend offer a single "Embed All" action
+    instead of clicking Embed on every paper one at a time.
+    """
+    unembedded = (
+        db.query(Paper)
+        .join(LibraryEntry, LibraryEntry.paper_id == Paper.id)
+        .filter(LibraryEntry.user_id == current_user.id, Paper.is_embedded == False)  # noqa: E712
+        .all()
+    )
+
+    to_embed = [p for p in unembedded if p.abstract]
+    skipped_no_abstract_count = len(unembedded) - len(to_embed)
+
+    embedded_count = 0
+    failed_count = 0
+    for paper in to_embed:
+        success = embed_paper(
+            paper_id=paper.id,
+            external_id=paper.external_id,
+            title=paper.title,
+            abstract=paper.abstract,
+        )
+        if success:
+            paper.is_embedded = True
+            embedded_count += 1
+        else:
+            failed_count += 1
+
+    db.commit()
+
+    return {
+        "embedded_count": embedded_count,
+        "failed_count": failed_count,
+        "skipped_no_abstract_count": skipped_no_abstract_count,
     }
 
 
@@ -208,21 +310,19 @@ def semantic_search(
     current_user: User = Depends(get_current_user),
 ):
     """
-    Searches for papers by MEANING, not keywords.
+    Searches for papers by MEANING, not keywords, scoped to papers in the
+    current user's library.
 
-    This is fundamentally different from POST /papers/search (which
-    hits the arXiv API with a keyword query). This endpoint:
-    1. Embeds your query using OpenAI
+    1. Embeds your query using fastembed (local, no API call)
     2. Asks Qdrant "what paper vectors are closest to this query vector?"
-    3. Returns those papers from our Postgres database, ranked by
-       semantic similarity score (0-1, higher = more similar)
-
-    Example: searching "how do machines understand language" will find
-    papers about NLP even if they never use those exact words.
+       (over-fetching candidates, since Qdrant's vectors are shared across
+       all users, not just this one)
+    3. Filters those candidates down to papers in THIS user's library
+    4. Returns them from Postgres, ranked by semantic similarity score
     """
     vector_results = search_similar_papers(
         query=request.query,
-        limit=request.limit,
+        limit=request.limit * LIBRARY_FILTER_OVERSAMPLE,
     )
 
     if not vector_results:
@@ -232,9 +332,16 @@ def semantic_search(
             "results": [],
         }
 
-    # Look up the full paper details from Postgres using the IDs
-    # Qdrant returned. Qdrant only stores vectors + minimal metadata;
-    # the full paper data (authors, year, etc.) lives in Postgres.
+    user_paper_ids = _user_library_paper_ids(db, current_user.id)
+    vector_results = [r for r in vector_results if r["paper_id"] in user_paper_ids][: request.limit]
+
+    if not vector_results:
+        return {
+            "query": request.query,
+            "message": "No embedded papers found in your library. Try embedding some papers first via POST /papers/{id}/embed.",
+            "results": [],
+        }
+
     paper_ids = [r["paper_id"] for r in vector_results]
     papers_map = {
         p.id: p
@@ -267,40 +374,38 @@ async def synthesize(
     current_user: User = Depends(get_current_user),
 ):
     """
-    The main PaperPilot feature — combines semantic search + LLM synthesis
-    into a single endpoint.
+    The main PaperPilot feature — combines semantic search (scoped to the
+    current user's library) + LLM synthesis into a single endpoint.
 
-    What happens under the hood:
     1. Embeds the query locally (fastembed, no API call)
-    2. Searches Qdrant for the most similar paper vectors
-    3. Looks up full paper details from Postgres
+    2. Searches Qdrant for the most similar paper vectors, over-fetching
+       since vectors are shared across users
+    3. Filters candidates down to papers in THIS user's library, then
+       looks up full paper details from Postgres
     4. Sends papers + query to Groq (Llama 3) via LangChain
     5. Returns a cited synthesis paragraph + the source papers
-
-    This is the complete RAG loop:
-    Retrieve (steps 1-3) → Augment prompt (step 4) → Generate (step 5)
     """
-    # Step 1 & 2: semantic search over embedded papers
     vector_results = search_similar_papers(
         query=request.query,
-        limit=request.limit,
+        limit=request.limit * LIBRARY_FILTER_OVERSAMPLE,
     )
+
+    user_paper_ids = _user_library_paper_ids(db, current_user.id)
+    vector_results = [r for r in vector_results if r["paper_id"] in user_paper_ids][: request.limit]
 
     if not vector_results:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=(
-                "No embedded papers found. "
+                "No embedded papers found in your library. "
                 "Search for papers first (POST /papers/search), "
                 "then embed them (POST /papers/{id}/embed)."
             ),
         )
 
-    # Step 3: fetch full paper details from Postgres
     paper_ids = [r["paper_id"] for r in vector_results]
     papers = db.query(Paper).filter(Paper.id.in_(paper_ids)).all()
 
-    # Build the list of paper dicts the synthesis agent expects
     papers_for_synthesis = [
         {
             "title": p.title,
@@ -311,7 +416,6 @@ async def synthesize(
         for p in papers
     ]
 
-    # Steps 4 & 5: LangChain synthesis via Groq
     synthesis = await synthesize_papers(
         query=request.query,
         papers=papers_for_synthesis,
@@ -342,9 +446,9 @@ async def synthesize_with_graph(
     current_user: User = Depends(get_current_user),
 ):
     """
-    Same retrieval as /synthesize, but generation runs through the
-    LangGraph pipeline (app/agents/synthesis_graph.py) instead of the
-    single-shot chain.
+    Same retrieval as /synthesize (scoped to the current user's library),
+    but generation runs through the LangGraph pipeline
+    (app/agents/synthesis_graph.py) instead of the single-shot chain.
 
     That pipeline is a small loop of three nodes:
       1. supervisor  — decides what happens next (generate vs. stop)
@@ -356,21 +460,20 @@ async def synthesize_with_graph(
     the supervisor routes back to synthesize with feedback describing
     exactly what was wrong, and it tries again (up to 2 attempts total)
     before giving up and returning whatever it has.
-
-    The response includes `citations_valid` and the valid/invalid
-    citation lists so the caller can see whether the graph's self-check
-    actually passed, rather than just trusting the LLM's output blindly.
     """
     vector_results = search_similar_papers(
         query=request.query,
-        limit=request.limit,
+        limit=request.limit * LIBRARY_FILTER_OVERSAMPLE,
     )
+
+    user_paper_ids = _user_library_paper_ids(db, current_user.id)
+    vector_results = [r for r in vector_results if r["paper_id"] in user_paper_ids][: request.limit]
 
     if not vector_results:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=(
-                "No embedded papers found. "
+                "No embedded papers found in your library. "
                 "Search for papers first (POST /papers/search), "
                 "then embed them (POST /papers/{id}/embed)."
             ),

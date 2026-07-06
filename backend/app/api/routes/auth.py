@@ -5,14 +5,23 @@
 # into the main app in one line (see main.py). This is the standard
 # FastAPI project layout you'll see in real codebases.
 
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import User
-from app.schemas.user import UserCreate, UserOut, Token
-from app.core.security import hash_password, verify_password, create_access_token, decode_access_token
+from app.models import User, RefreshToken
+from app.schemas.user import UserCreate, UserOut, Token, RefreshRequest
+from app.core.security import (
+    hash_password,
+    verify_password,
+    create_access_token,
+    decode_access_token,
+    generate_refresh_token,
+    hash_refresh_token,
+)
 
 router = APIRouter()
 
@@ -118,11 +127,80 @@ def login(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    # Step 3: create and return the token. We embed the user's email as
-    # "sub" (subject) — this is what decode_access_token() will extract
-    # later to identify who made a request.
+    # Step 3: create the short-lived access token. We embed the user's
+    # email as "sub" (subject) — this is what decode_access_token() will
+    # extract later to identify who made a request.
     access_token = create_access_token(data={"sub": user.email})
-    return Token(access_token=access_token)
+
+    # Step 4: create a long-lived refresh token so the client can get a
+    # new access token later without logging in again. Only the hash is
+    # stored — the raw token goes to the client and is never seen again.
+    raw_refresh_token, token_hash, expires_at = generate_refresh_token()
+    db.add(RefreshToken(user_id=user.id, token_hash=token_hash, expires_at=expires_at))
+    db.commit()
+
+    return Token(access_token=access_token, refresh_token=raw_refresh_token)
+
+
+@router.post("/refresh", response_model=Token)
+def refresh(request: RefreshRequest, db: Session = Depends(get_db)):
+    """
+    Trades a valid, unexpired, unrevoked refresh token for a brand new
+    access token AND a brand new refresh token (the old one is revoked in
+    the same step — this "rotation" means a stolen refresh token can only
+    be used once before the legitimate client's next refresh invalidates
+    it).
+    """
+    token_hash = hash_refresh_token(request.refresh_token)
+    stored = (
+        db.query(RefreshToken)
+        .filter(RefreshToken.token_hash == token_hash)
+        .first()
+    )
+
+    # We always store expires_at as UTC, but not every DB backend round-trips
+    # tzinfo the same way (SQLite drops it on read even though Postgres
+    # keeps it) — normalize before comparing so this works on either.
+    expires_at = stored.expires_at if stored else None
+    if expires_at is not None and expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+
+    if (
+        stored is None
+        or stored.revoked
+        or expires_at < datetime.now(timezone.utc)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired refresh token. Please log in again.",
+        )
+
+    user = db.query(User).filter(User.id == stored.user_id).first()
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User no longer exists.",
+        )
+
+    # Rotate: revoke the used token, issue a new one.
+    stored.revoked = True
+    new_access_token = create_access_token(data={"sub": user.email})
+    raw_refresh_token, new_token_hash, expires_at = generate_refresh_token()
+    db.add(RefreshToken(user_id=user.id, token_hash=new_token_hash, expires_at=expires_at))
+    db.commit()
+
+    return Token(access_token=new_access_token, refresh_token=raw_refresh_token)
+
+
+@router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
+def logout(request: RefreshRequest, db: Session = Depends(get_db)):
+    """Revokes a refresh token so it can no longer be used to get new access tokens."""
+    token_hash = hash_refresh_token(request.refresh_token)
+    stored = db.query(RefreshToken).filter(RefreshToken.token_hash == token_hash).first()
+    if stored is not None:
+        stored.revoked = True
+        db.commit()
+    return None
 
 
 @router.get("/me", response_model=UserOut)
