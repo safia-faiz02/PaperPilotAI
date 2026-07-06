@@ -1,0 +1,9 @@
+streamlit==1.39.0
+# streamlit -> the UI framework itself. Turns plain Python scripts into
+# a web app: st.button(), st.text_input() etc. render as real widgets,
+# and the whole script re-runs top-to-bottom on every interaction.
+
+requests==2.32.3
+# requests -> the HTTP client this app uses to call the FastAPI backend.
+# Streamlit apps run entirely server-side, so these are normal
+# Python-to-Python HTTP calls, not browser JavaScript fetches.
